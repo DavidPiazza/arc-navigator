@@ -4,21 +4,19 @@ Audio sample exploration and analysis tool using monome controllers
 
 ## Overview
 
-Audio Map is an interactive tool for exploring large collections of audio samples using dimensionality-reduction techniques and an intuitive monome Arc controller interface. It processes audio files, extracts features, and creates a 2D map that can be navigated in real-time for audio discovery and performance.
+Audio Map is an interactive tool for exploring large collections of audio samples using dimensionality-reduction techniques and a monome arc. It processes audio files, extracts features, and creates a 2D map that can be navigated in real-time.
 
 ## Features
 
 - **Audio Processing**: Converts audio files to mono at 22,050 Hz and slices them into configurable segments
 - **Feature Extraction**: Extracts 28-dimensional feature vectors including MFCC, chroma, and spectral features
-- **Dimensionality Reduction**: Uses UMAP to create intuitive 2D audio maps
+- **Dimensionality Reduction**: Uses UMAP to create 2D maps
 - **Real-time Navigation**: Interactive exploration using monome Arc controller
-- **Flexible Playback**: Pitch-preserving time-stretch with variable playback rates (0.25x to 4.0x)
 
 ## Requirements
 
 - Python 3.8+
 - monome Arc controller
-- Audio files (WAV, AIFF, MP3, etc.)
 
 ## Installation
 
@@ -129,6 +127,6 @@ MIT License
 
 ## Links
 
-- [Homepage](https://github.com/artfwo/pymonome)
-- [Issues](https://github.com/artfwo/pymonome/issues)
-- [monome Documentation](https://monome.org/)
+- [Pymonome Repository](https://github.com/artfwo/pymonome)
+- [Pymonome Issues](https://github.com/artfwo/pymonome/issues)
+- [monome Documentation](https://monome.org/docs/arc/)
