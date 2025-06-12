@@ -1,0 +1,17 @@
+LICENSE
+MANIFEST.in
+README.rst
+monome.py
+pyproject.toml
+setup.py
+audio_atlas/__init__.py
+audio_atlas/build.py
+audio_atlas/cli.py
+audio_atlas/runtime.py
+audio_atlas.egg-info/PKG-INFO
+audio_atlas.egg-info/SOURCES.txt
+audio_atlas.egg-info/dependency_links.txt
+audio_atlas.egg-info/entry_points.txt
+audio_atlas.egg-info/requires.txt
+audio_atlas.egg-info/top_level.txt
+examples/arc.py

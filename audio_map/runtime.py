@@ -187,8 +187,10 @@ class ArcApp:
 class AudioPlayer:
     """Audio playback system using sounddevice with low-latency CoreAudio."""
     
-    def __init__(self, device=None, sample_rate=None):
+    def __init__(self, device=None, sample_rate=None, loop_enabled: bool = False):
         self.device = device
+        # Store looping preference
+        self.loop_enabled = loop_enabled
         
         # Auto-detect optimal sample rate if not specified
         if sample_rate is None:
@@ -223,6 +225,9 @@ class AudioPlayer:
         self.morph_sources = []  # List of (audio_data, position, amplitude) tuples
         self.morph_lock = threading.Lock()
         
+        # Playback rate control (handled in real-time during callback)
+        self.playback_rate = 1.0
+        
         # Start the audio stream once
         self.start_stream()
     
@@ -235,7 +240,14 @@ class AudioPlayer:
                 pass
         
     def load_audio(self, file_path, start_time=0, duration=1.0):
-        """Load audio file segment into memory with LRU caching."""
+        """Load audio file segment into memory with LRU caching.
+        
+        Args:
+            file_path: Path to audio file
+            start_time: Start time in seconds  
+            duration: Duration in seconds
+        """
+        # Cache key without rate since we no longer pre-process for different rates
         cache_key = f"{file_path}_{start_time}_{duration}"
         
         # Check cache first
@@ -266,6 +278,8 @@ class AudioPlayer:
             if len(segment) < duration_samples:
                 segment = np.pad(segment, (0, duration_samples - len(segment)))
             
+            # No time-stretching applied - rate control now handled in real-time during playback
+            
             # Store in LRU cache
             self.audio_cache.put(cache_key, segment)
             return segment
@@ -292,9 +306,10 @@ class AudioPlayer:
                     for idx, (audio_data, position, amplitude) in enumerate(self.morph_sources):
                         if position < len(audio_data):
                             # Add this source's contribution scaled by amplitude
-                            mixed_sample += audio_data[position] * amplitude
-                            # Update position for next callback
-                            self.morph_sources[idx] = (audio_data, position + 1, amplitude)
+                            mixed_sample += audio_data[int(position)] * amplitude
+                            # Update position with rate control
+                            new_position = position + self.playback_rate
+                            self.morph_sources[idx] = (audio_data, new_position, amplitude)
                         else:
                             # Mark for removal if at end
                             sources_to_remove.append(idx)
@@ -329,22 +344,23 @@ class AudioPlayer:
                     # Crossfade ratio (0 to 1)
                     fade_ratio = self.crossfade_position / self.crossfade_samples
                     
-                    # Get current audio sample
+                    # Get current audio sample (with rate control)
                     current_sample = 0.0
-                    if self.position < len(self.current_audio):
-                        current_sample = self.current_audio[self.position]
+                    if int(self.position) < len(self.current_audio):
+                        current_sample = self.current_audio[int(self.position)]
                     
-                    # Get next audio sample  
+                    # Get next audio sample (with rate control)
                     next_sample = 0.0
-                    if self.crossfade_position < len(self.next_audio):
-                        next_sample = self.next_audio[self.crossfade_position]
+                    if int(self.crossfade_position) < len(self.next_audio):
+                        next_sample = self.next_audio[int(self.crossfade_position)]
                     
                     # Crossfade: fade out current, fade in next
                     mixed_sample = current_sample * (1.0 - fade_ratio) + next_sample * fade_ratio
                     outdata[i, 0] = mixed_sample
                     
-                    self.position += 1
-                    self.crossfade_position += 1
+                    # Update positions with rate control
+                    self.position += self.playback_rate
+                    self.crossfade_position += self.playback_rate
                 else:
                     # Crossfade complete, switch to next audio
                     self.current_audio = self.next_audio
@@ -354,21 +370,19 @@ class AudioPlayer:
                     self.crossfade_position = 0
                     break
         else:
-            # Normal playback
+            # Normal playback with real-time rate control
             if self.position >= len(self.current_audio):
                 self.is_playing = False
                 return
             
-            # Copy audio data
-            remaining = len(self.current_audio) - self.position
-            copy_frames = min(frames, remaining)
-            
-            if copy_frames > 0:
-                outdata[:copy_frames, 0] = self.current_audio[self.position:self.position+copy_frames]
-                self.position += copy_frames
-                
-                if self.position >= len(self.current_audio):
+            # Sample-by-sample playback with rate control
+            for i in range(frames):
+                if int(self.position) < len(self.current_audio):
+                    outdata[i, 0] = self.current_audio[int(self.position)]
+                    self.position += self.playback_rate
+                else:
                     self.is_playing = False
+                    break
     
     def start_stream(self):
         """Start the audio stream with optimized settings."""
@@ -411,8 +425,17 @@ class AudioPlayer:
             self.stream.close()
             self.stream = None
     
-    def play_audio(self, file_path, start_time=0, duration=1.0):
-        """Play audio file segment with crossfading."""
+    def play_audio(self, file_path, start_time=0, duration=1.0, rate=1.0):
+        """Play audio file segment with crossfading and real-time rate control.
+        
+        Args:
+            file_path: Path to audio file
+            start_time: Start time in seconds
+            duration: Duration in seconds  
+            rate: Playback rate multiplier (affects both speed and pitch)
+        """
+        # Set the playback rate for real-time control
+        self.playback_rate = rate
         new_audio = self.load_audio(file_path, start_time, duration)
         
         if self.is_playing and self.current_audio is not None:
@@ -450,14 +473,26 @@ class AudioPlayer:
             with self.morph_lock:
                 self.morph_sources.clear()
     
-    def set_morph_sources(self, sources_with_distances):
+    def set_playback_rate(self, rate):
+        """Set the playback rate for real-time rate control.
+        
+        Args:
+            rate: Playback rate multiplier (0.25 to 4.0). Affects both speed and pitch.
+        """
+        self.playback_rate = max(0.25, min(4.0, rate))
+    
+    def set_morph_sources(self, sources_with_distances, rate=1.0):
         """Set multiple audio sources for morph mode with distance-based amplitudes.
         
         Args:
             sources_with_distances: List of tuples (file_path, start_time, duration, distance)
+            rate: Playback rate multiplier (affects both speed and pitch)
         """
         if self.current_mode != 1:
             return
+        
+        # Set the playback rate for real-time control
+        self.playback_rate = rate
         
         with self.morph_lock:
             self.morph_sources.clear()
@@ -469,7 +504,7 @@ class AudioPlayer:
                 distance_range = max_distance - min_distance if max_distance > min_distance else 1.0
                 
                 for file_path, start_time, duration, distance in sources_with_distances:
-                    # Load audio data
+                    # Load audio data at original speed
                     audio_data = self.load_audio(file_path, start_time, duration)
                     
                     # Calculate amplitude based on distance (inverse relationship)
@@ -487,24 +522,31 @@ class AudioPlayer:
     
     def update(self):
         """Update playback state."""
-        # Morph mode continuously loops all sources
+        # Morph mode: restart sources only if looping is enabled
         if self.current_mode == 1:
             with self.morph_lock:
-                # Check if any sources need restarting (for looping)
-                for idx, (audio_data, position, amplitude) in enumerate(self.morph_sources):
+                new_sources = []
+                for audio_data, position, amplitude in self.morph_sources:
                     if position >= len(audio_data):
-                        # Restart from beginning
-                        self.morph_sources[idx] = (audio_data, 0, amplitude)
+                        if self.loop_enabled:
+                            # Restart from beginning if looping
+                            new_sources.append((audio_data, 0, amplitude))
+                        # If looping disabled, simply drop this source (stop playback)
+                    else:
+                        new_sources.append((audio_data, position, amplitude))
+                self.morph_sources = new_sources
 
 
 class mapApp(ArcApp):
     """arc-navigator Application for exploring 2D audio space with Arc controller."""
     
-    def __init__(self, map_path, audio_device=None):
+    def __init__(self, map_path, audio_device=None, k_nearest=8, loop_enabled: bool = False):
         super().__init__()
         self.map_path = map_path
         self.map_data = None
-        self.audio_player = AudioPlayer(device=audio_device)
+        # Pass looping preference down to the AudioPlayer
+        self.audio_player = AudioPlayer(device=audio_device, loop_enabled=loop_enabled)
+        self.loop_enabled = loop_enabled
         
         # Navigation state
         self.cursor_x = 0.0  # Cursor position in [-1, 1] range
@@ -515,7 +557,14 @@ class mapApp(ArcApp):
         # Interaction parameters
         self.movement_speed = 0.02  # How fast cursor moves per encoder delta
         self.zoom_speed = 0.05     # How fast zoom changes per encoder delta
-        self.k_nearest = 8         # Number of nearest points for morph mode
+        self.k_nearest = k_nearest         # Number of nearest points for morph mode
+        
+        # Rate control parameters (Ring 3)
+        self.playback_rate = 1.0   # Playback rate multiplier (0.25x to 4.0x)
+        self.rate_speed = 0.02     # How fast rate changes per encoder delta
+        self.last_rate_change_time = 0  # Timestamp of last rate change
+        self.rate_display_timeout = 2.0  # Seconds to show rate dial before reverting to map
+        self.showing_rate_dial = False   # Whether Ring 3 is showing rate dial
         
         # Audio throttling
         self.last_audio_change = 0
@@ -545,6 +594,9 @@ class mapApp(ArcApp):
         self.density_calc_time = 0
         self.last_perf_report = 0
         self._last_points_in_view = 0
+        
+        # Track last set of nearest indices to avoid redundant retriggers
+        self.last_nearest_indices: tuple[int, ...] = tuple()
     
     def load_map(self):
         """Load the precomputed map data from pickle file."""
@@ -799,9 +851,18 @@ class mapApp(ArcApp):
             self.zoom_level = max(0.1, min(10.0, self.zoom_level))
             navigation_changed = True
         
-        self.navigation_changed = navigation_changed
+        # Ring 3: Rate control
+        if self.encoder_deltas[3] != 0:
+            rate_change = self.encoder_deltas[3] * self.rate_speed
+            self.playback_rate += rate_change
+            self.playback_rate = max(0.25, min(4.0, self.playback_rate))
+            # Record time of rate change and show rate dial
+            import time
+            self.last_rate_change_time = time.time()
+            self.showing_rate_dial = True
+            navigation_changed = True
         
-        # Ring 3: Reserved for future use (removed playback mode control)
+        self.navigation_changed = navigation_changed
     
     def update_audio_playback(self):
         """Update audio playback based on cursor position and mode with throttling."""
@@ -817,23 +878,31 @@ class mapApp(ArcApp):
             return
         
         nearest_points = self.find_nearest_points(
-            self.cursor_x, self.cursor_y, 
+            self.cursor_x, self.cursor_y,
             k=self.k_nearest if self.playback_mode == 1 else 1
         )
-        
+
         if not nearest_points:
+            return
+
+        # Extract indices of nearest points and compare with last playback
+        new_indices = tuple(sorted(p['index'] for p in nearest_points))
+        if new_indices == self.last_nearest_indices:
+            # Same neighbour(s) – skip retriggering audio
             return
         
         if self.playback_mode == 0:  # Single mode
-            # Play the nearest point with crossfading
+            # Play the nearest point with crossfading and current rate
             point = nearest_points[0]
             self.audio_player.play_audio(
                 point['path'], 
                 point['slice_time'], 
-                duration=1.0
+                duration=1.0,
+                rate=self.playback_rate
             )
             self.last_audio_change = current_time
             self.last_cursor_pos = (self.cursor_x, self.cursor_y)
+            self.last_nearest_indices = new_indices
         
         else:  # Morph mode
             # Set up multiple sources with distance-based amplitudes
@@ -846,12 +915,22 @@ class mapApp(ArcApp):
                     point['distance']
                 ))
             
-            self.audio_player.set_morph_sources(sources_with_distances)
+            self.audio_player.set_morph_sources(sources_with_distances, rate=self.playback_rate)
             self.last_audio_change = current_time
             self.last_cursor_pos = (self.cursor_x, self.cursor_y)
+            self.last_nearest_indices = new_indices
     
     def update_led_visualization(self):
         """Update LED patterns to visualize navigation state."""
+        import time
+        current_time = time.time()
+        
+        # Check if we should hide the rate dial and revert to map visualization
+        if self.showing_rate_dial and (current_time - self.last_rate_change_time) > self.rate_display_timeout:
+            self.showing_rate_dial = False
+            # Force update Ring 3 to show map visualization
+            self.navigation_changed = True
+        
         # Only update position/zoom LEDs if navigation changed
         if self.navigation_changed:
             # Ring 0: X position indicator
@@ -875,33 +954,64 @@ class mapApp(ArcApp):
                     self.led_brightness[2][led] = 8
                 else:
                     self.led_brightness[2][led] = 0
-        
-        # Ring 3: Point density visualization (update less frequently)
-        import time
-        current_time = time.time() * 1000
-        if (self.navigation_changed or 
-            current_time - self.last_density_update >= self.density_update_interval):
-            densities = self.calculate_point_density(3)
-            max_density = max(densities) if densities else 1
-            for led in range(64):
-                if max_density > 0:
-                    brightness = int((densities[led] / max_density) * 15)
-                    self.led_brightness[3][led] = brightness
-                else:
+            
+            # Ring 3: Rate control or map visualization
+            if self.showing_rate_dial:
+                # Show rate dial similar to zoom control
+                # Map rate [0.25, 4.0] to LED range [0, 64]
+                rate_leds = int((self.playback_rate - 0.25) / (4.0 - 0.25) * 64)
+                rate_leds = max(0, min(63, rate_leds))  # Clamp to valid range
+                
+                # Clear all LEDs first
+                for led in range(64):
                     self.led_brightness[3][led] = 0
+                
+                # Fill LEDs up to rate position (similar to zoom)
+                for led in range(rate_leds + 1):
+                    self.led_brightness[3][led] = 8
+                
+                # Highlight the exact rate position
+                self.led_brightness[3][rate_leds] = 15
+                
+                # Add special indicator for 1.0x speed (around position 21)
+                center_pos = int((1.0 - 0.25) / (4.0 - 0.25) * 64)  # Position for 1.0x rate
+                if abs(rate_leds - center_pos) <= 1:
+                    # Blink for 1.0x rate
+                    center_brightness = 15 if (int(current_time * 4) % 2) else 5
+                    self.led_brightness[3][center_pos] = center_brightness
+            else:
+                # Show map visualization - calculate density for Ring 3
+                densities = self.calculate_point_density(ring=3)
+                max_density = max(densities) if densities else 1
+                
+                for led in range(64):
+                    if max_density > 0:
+                        # Scale density to brightness (0-15)
+                        brightness = int((densities[led] / max_density) * 15)
+                        self.led_brightness[3][led] = brightness
+                    else:
+                        self.led_brightness[3][led] = 0
     
     async def setup(self):
         """Called when Arc is connected."""
         print("Arc connected - arc-navigator ready")
         print("Ring 0: X position | Ring 1: Y position")
-        print("Ring 2: Zoom level | Ring 3: Point density")
+        print("Ring 2: Zoom level | Ring 3: Playback rate (varispeed)")
         print(f"Mode: {'morph' if self.playback_mode else 'single'}")
+        print(f"Initial playback rate: {self.playback_rate:.2f}x (affects speed and pitch)")
+        print(f"Morph neighbors: {self.k_nearest}")
+        print(f"Looping {'enabled' if self.loop_enabled else 'disabled'}")
     
     async def on_button_press(self):
         """Handle button press to toggle playback mode."""
         self.playback_mode = 1 - self.playback_mode
         self.audio_player.set_mode(self.playback_mode)
-        print(f"Playback mode: {'cycle' if self.playback_mode else 'single'}")
+        if self.playback_mode == 1:
+            print(f"Playback mode: morph (using {self.k_nearest} nearest neighbors)")
+        else:
+            print("Playback mode: single")
+        # Reset nearest tracking so next update triggers playback for new mode
+        self.last_nearest_indices = tuple()
     
     async def update(self):
         """Main update loop called every 5ms."""
@@ -930,7 +1040,9 @@ class mapApp(ArcApp):
                       f"Points in view: {self._last_points_in_view}, "
                       f"Cache size: {self.audio_player.audio_cache.current_size_bytes / 1024 / 1024:.1f}MB, "
                       f"Using: {'KDTree' if self.kdtree is not None else 'Brute-force'}, "
-                      f"Cursor: ({self.cursor_x:.2f}, {self.cursor_y:.2f}), Zoom: {self.zoom_level:.2f}")
+                      f"Cursor: ({self.cursor_x:.2f}, {self.cursor_y:.2f}), Zoom: {self.zoom_level:.2f}, "
+                      f"Rate: {self.playback_rate:.2f}x{'*' if self.showing_rate_dial else ''}, "
+                      f"Neighbors: {self.k_nearest}")
             self.last_perf_report = current_time
     
     def cleanup(self):
@@ -943,8 +1055,10 @@ class mapApp(ArcApp):
                 self.arc.ring_all(ring, 0)
 
 
-def run_navigator(map_path, device_id=None):
-    """Enhanced startup function for the arc-navigator with device listing and user feedback."""
+def run_navigator(map_path, device_id=None, neighbors=8, loop=False):
+    """Enhanced startup function for the arc-navigator with device listing and user feedback.
+    The `loop` flag controls whether audio slices should loop continuously.
+    """
     # Re-check scipy availability at runtime
     try:
         from scipy.spatial import cKDTree as test_import
@@ -993,12 +1107,14 @@ def run_navigator(map_path, device_id=None):
         print("  Ring 0: X position navigation")
         print("  Ring 1: Y position navigation")  
         print("  Ring 2: Zoom level control")
-        print("  Ring 3: Point density visualization")
+        print("  Ring 3: Playback rate control (0.25x to 4.0x, varispeed effect)")
         print("  Button: Toggle playback mode (single/morph)")
+        print(f"  Morph mode using {neighbors} nearest neighbors")
+        print(f"  Looping {'enabled' if loop else 'disabled'}")
         print("\nWaiting for Arc controller connection...")
         
         # Create and start the arc-navigator
-        app = mapApp(map_path, audio_device=device_id)
+        app = mapApp(map_path, audio_device=device_id, k_nearest=neighbors, loop_enabled=loop)
         
         # Run the asyncio event loop
         asyncio.run(app.run())
@@ -1015,7 +1131,7 @@ def run_navigator(map_path, device_id=None):
             app.cleanup()
 
 
-def start_navigator(device=None):
+def start_navigator(device=None, neighbors=8, loop=False):
     """Legacy compatibility function for the CLI interface."""
     # Default map path
     map_path = "map.pkl"
@@ -1026,4 +1142,4 @@ def start_navigator(device=None):
         return
     
     # Call the main run_navigator function
-    run_navigator(map_path, device) 
+    run_navigator(map_path, device, neighbors, loop) 

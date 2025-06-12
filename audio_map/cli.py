@@ -101,6 +101,21 @@ def run(
         "-d", 
         help="CoreAudio output device ID (use sounddevice.query_devices() to list)",
         metavar="ID"
+    ),
+    neighbors: int = typer.Option(
+        8,
+        "--neighbors",
+        "-n",
+        help="Number of nearest neighbors to use in morph mode (default: 8)",
+        min=1,
+        max=32
+    ),
+    loop: bool = typer.Option(
+        False,
+        "--loop",
+        "-l",
+        help="Enable continuous looping of audio slices. If omitted, slices play once.",
+        is_flag=True,
     )
 ):
     """
@@ -112,8 +127,8 @@ def run(
     - Ring 0: X-axis navigation
     - Ring 1: Y-axis navigation  
     - Ring 2: Zoom level control
-    - Ring 3: Playback mode selection
-    - Push button: Reset cursor to center
+    - Ring 3: Playback rate control (0.25x to 4.0x speed, varispeed effect affecting pitch)
+    - Push button: Toggle playback mode (single/morph)
     
     Audio output uses CoreAudio for low-latency playback. If no device is specified,
     the system default output device will be used.
@@ -121,6 +136,7 @@ def run(
     Examples:
         audio_navigator run                    # Use default audio device
         audio_navigator run --device 5        # Use specific CoreAudio device
+        audio_navigator run --neighbors 12    # Use 12 nearest neighbors in morph mode
     
     Note: Requires 'map.pkl' file in the current directory (created with 'build' command)
     and a connected monome Arc controller.
@@ -161,7 +177,7 @@ def run(
     # Import and call the runtime module
     try:
         from . import runtime as runtime_module
-        runtime_module.run_navigator(str(map_path), device)
+        runtime_module.run_navigator(str(map_path), device, neighbors, loop)
     except ImportError:
         typer.echo("Error: Runtime module not yet implemented", err=True)
         raise typer.Exit(1)
